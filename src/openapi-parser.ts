@@ -52,6 +52,29 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+function getParameterKey(param: OpenAPIV3.ParameterObject) {
+  return `${param.in}:${param.name}`;
+}
+
+function getOperationParameters(
+  pathItem: OpenAPIV3.PathItemObject,
+  operation: OpenAPIV3.OperationObject,
+) {
+  const params = new Map<string, OpenAPIV3.ParameterObject>();
+
+  for (const rawParam of pathItem.parameters ?? []) {
+    if ('$ref' in rawParam) continue;
+    params.set(getParameterKey(rawParam), rawParam);
+  }
+
+  for (const rawParam of operation.parameters ?? []) {
+    if ('$ref' in rawParam) continue;
+    params.set(getParameterKey(rawParam), rawParam);
+  }
+
+  return params.values();
+}
+
 /**
  * Resolves all $ref references in a schema inline.
  */
@@ -159,9 +182,7 @@ export async function parseOpenAPISpec() {
       const shape: Record<string, ZodType> = {};
 
       // Path and query parameters
-      for (const rawParam of operation.parameters ?? []) {
-        if ('$ref' in rawParam) continue;
-        const param = rawParam;
+      for (const param of getOperationParameters(pathItem, operation)) {
         if (param.in === 'header' || param.in === 'cookie') continue;
 
         paramSources.push({
