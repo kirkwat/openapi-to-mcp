@@ -25,14 +25,14 @@ paths:
         '200':
           description: OK
   /items/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
     post:
       summary: Update Item
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
       requestBody:
         content:
           application/json:
@@ -53,12 +53,6 @@ paths:
           description: OK
     delete:
       summary: Delete Item
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
       responses:
         '204':
           description: Deleted

@@ -74,6 +74,9 @@ describe('parseOpenAPISpec', () => {
       name: 'tags',
       in: 'body',
     });
+
+    const deleteItem = tools.find((t) => t.name === 'delete_item')!;
+    expect(deleteItem.paramSources).toContainEqual({ name: 'id', in: 'path' });
   });
 
   it('sets annotations based on HTTP method', async () => {
