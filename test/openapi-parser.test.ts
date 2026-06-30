@@ -3,6 +3,10 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const FIXTURE_PATH = path.resolve(__dirname, 'fixtures/openapi.yaml');
+const XQUIK_FIXTURE_PATH = path.resolve(
+  __dirname,
+  'fixtures/xquik.openapi.yaml',
+);
 
 describe('parseOpenAPISpec', () => {
   beforeEach(() => {
@@ -89,5 +93,40 @@ describe('parseOpenAPISpec', () => {
     const updateItem = tools.find((t) => t.name === 'update_item')!;
     expect(updateItem.annotations.readOnlyHint).toBeUndefined();
     expect(updateItem.annotations.destructiveHint).toBeUndefined();
+  });
+
+  it('loads Xquik OpenAPI 3.1 operations and auth metadata', async () => {
+    vi.stubEnv('OPENAPI_SPEC_URL', XQUIK_FIXTURE_PATH);
+    const parseOpenAPISpec = await loadParser();
+    const { tools, spec } = await parseOpenAPISpec();
+
+    expect(spec.openapi).toBe('3.1.0');
+    expect(spec.info.title).toBe('Xquik API');
+    expect(spec.servers?.[0]?.url).toBe('https://xquik.com');
+    expect(spec.components?.securitySchemes?.apiKey).toMatchObject({
+      type: 'apiKey',
+      in: 'header',
+      name: 'x-api-key',
+    });
+    expect(tools.map((tool) => tool.name).sort()).toEqual([
+      'create_draft',
+      'get_x_user',
+      'search_x_posts',
+    ]);
+
+    const searchPosts = tools.find((tool) => tool.name === 'search_x_posts')!;
+    expect(searchPosts.annotations.readOnlyHint).toBe(true);
+    expect(searchPosts.paramSources).toContainEqual({ name: 'q', in: 'query' });
+    expect(searchPosts.paramSources).toContainEqual({
+      name: 'limit',
+      in: 'query',
+    });
+
+    const createDraft = tools.find((tool) => tool.name === 'create_draft')!;
+    expect(createDraft.method).toBe('POST');
+    expect(createDraft.paramSources).toContainEqual({
+      name: 'prompt',
+      in: 'body',
+    });
   });
 });

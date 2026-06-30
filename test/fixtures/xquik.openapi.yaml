@@ -1,0 +1,128 @@
+openapi: 3.1.0
+info:
+  title: Xquik API
+  version: "1.0"
+  description: Public X data API for search, user lookup, and draft composition.
+servers:
+  - url: https://xquik.com
+security:
+  - apiKey: []
+paths:
+  /api/v1/x/tweets/search:
+    get:
+      summary: Search X Posts
+      description: Search public X posts with cursor pagination.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          description: Maximum posts to return.
+      responses:
+        "200":
+          description: Search results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TweetSearchResponse"
+  /api/v1/x/users/{id}:
+    get:
+      summary: Get X User
+      description: Look up an X user by ID or handle.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: User ID or handle.
+      responses:
+        "200":
+          description: User profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+  /api/v1/compose:
+    post:
+      summary: Create Draft
+      description: Create an assisted draft for review before posting.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - prompt
+              properties:
+                prompt:
+                  type: string
+                  description: Draft instruction.
+                tone:
+                  type: string
+                  description: Optional writing tone.
+      responses:
+        "200":
+          description: Draft result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComposeResponse"
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+  schemas:
+    Tweet:
+      type: object
+      required:
+        - id
+        - text
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+        authorId:
+          type: string
+    TweetSearchResponse:
+      type: object
+      required:
+        - tweets
+      properties:
+        tweets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tweet"
+        nextCursor:
+          type: string
+    User:
+      type: object
+      required:
+        - id
+        - username
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        name:
+          type: string
+    ComposeResponse:
+      type: object
+      required:
+        - text
+      properties:
+        text:
+          type: string
