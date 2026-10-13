@@ -14,6 +14,8 @@ paths:
           in: query
           schema:
             type: integer
+            minimum: 1
+            maximum: 100
           description: Max items to return
         - name: status
           in: query
@@ -21,18 +23,38 @@ paths:
           schema:
             type: string
             enum: [active, archived]
+        - name: X-Request-Id
+          in: header
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+  /items/bulk:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/Item'
       responses:
         '200':
           description: OK
   /items/{id}:
+    get:
+      operationId: getItem
+      summary: Get Item
+      parameters:
+        - $ref: '#/components/parameters/ItemId'
+      responses:
+        '200':
+          description: OK
     post:
       summary: Update Item
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
+        - $ref: '#/components/parameters/ItemId'
       requestBody:
         content:
           application/json:
@@ -51,14 +73,161 @@ paths:
       responses:
         '200':
           description: OK
+    put:
+      summary: Replace Item
+      parameters:
+        - $ref: '#/components/parameters/ItemId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Item'
+      responses:
+        '200':
+          description: OK
+    patch:
+      summary: Patch Item
+      x-mcp-destructive: false
+      parameters:
+        - $ref: '#/components/parameters/ItemId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                priority:
+                  $ref: '#/components/schemas/Priority'
+      responses:
+        '200':
+          description: OK
     delete:
       summary: Delete Item
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
+        - $ref: '#/components/parameters/ItemId'
       responses:
         '204':
           description: Deleted
+  /reports/{reportId}:
+    parameters:
+      - name: reportId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: format
+        in: query
+        required: true
+        schema:
+          type: string
+          enum: [csv, json]
+    get:
+      operationId: reports/get:v1
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, json]
+        - name: minScore
+          in: query
+          schema:
+            type: number
+            minimum: 0
+            exclusiveMinimum: true
+        - name: maxScore
+          in: query
+          schema:
+            type: number
+            maximum: 1
+            exclusiveMaximum: false
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            nullable: true
+            x-mcp-header: Cursor
+      responses:
+        '200':
+          description: OK
+    post:
+      summary: List Items
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+    put:
+      summary: Replace Report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: object
+                  nullable: true
+                  allOf:
+                    - type: object
+                      properties:
+                        text:
+                          type: string
+      responses:
+        '200':
+          description: OK
+components:
+  parameters:
+    ItemId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+        x-mcp-header: Item-Id
+  schemas:
+    Priority:
+      type: string
+      enum: [low, high]
+      nullable: true
+    Item:
+      type: object
+      required:
+        - name
+      externalDocs:
+        url: https://docs.test.com/item
+      xml:
+        name: item
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: Widget
+        notes:
+          type: string
+          nullable: true
+        priority:
+          $ref: '#/components/schemas/Priority'
+        owner:
+          nullable: true
+          allOf:
+            - type: object
+              properties:
+                email:
+                  type: string
+        sku:
+          type: string
+          format: internal-sku
+          x-internal: true
+        example:
+          type: string
+          description: A property literally named "example"
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/Item'

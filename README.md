@@ -17,14 +17,31 @@ A minimal [MCP](https://modelcontextprotocol.io) server that auto-generates tool
 | `OPENAPI_SPEC_URL` | Yes      | URL or file path to your OpenAPI spec (YAML or JSON)                   |
 | `API_BASE_URL`     | No       | Override the API base URL (defaults to `servers[0].url` from the spec) |
 | `MCP_SERVER_NAME`  | No       | Override the MCP server name (defaults to `info.title` from the spec)  |
+| `MCP_TOOL_PREFIX`  | No       | Prefix prepended to every tool name, for namespacing (e.g. `acme_`)    |
 | `PORT`             | No       | Local dev server port (default: 3000)                                  |
 
 ## How It Works
 
 1. On cold start, the server fetches and parses your OpenAPI spec
-2. Each API endpoint becomes an MCP tool with a Zod-validated input schema
-3. When a tool is called, the request is forwarded to your API with the caller's headers (API key, Bearer token, etc.) passed through unchanged
-4. The spec and tools are cached in memory — warm invocations skip the fetch
+2. Each API endpoint becomes an MCP tool; its JSON Schema validates arguments before your API is called (tools whose schema fails to compile are skipped with a logged error)
+3. When a tool is called, the request is forwarded to your API with the caller's headers (API key, Bearer token, etc.) passed through unchanged; MCP transport headers (`Mcp-*`) are stripped
+4. The spec and tools are cached in memory, so warm invocations skip the fetch
+
+The server is stateless and serves both MCP 2026-07-28 and 2025-era clients from the root path. `GET` returns `405`.
+
+## Tool Annotations
+
+Hints are derived from the HTTP method:
+
+| Method   | readOnly | destructive | idempotent |
+| -------- | -------- | ----------- | ---------- |
+| `GET`    | yes      |             | yes        |
+| `POST`   |          |             |            |
+| `PUT`    |          | yes         | yes        |
+| `PATCH`  |          | yes         |            |
+| `DELETE` |          | yes         | yes        |
+
+`openWorldHint` is always `false`. Set `x-mcp-destructive: true|false` on an operation to override.
 
 ## Running Locally
 
@@ -52,18 +69,18 @@ OPENAPI_SPEC_URL=/path/to/your/openapi.yml
 pnpm dev
 ```
 
-The server starts at `http://localhost:3000/mcp`.
+The server starts at `http://localhost:3000`.
 
 ### 4. Connect your MCP client to the local server
 
-How you connect to the MCP server depends on your client (Claude Code, Cursor, VS Code, etc.) — check your client's docs for where to add MCP servers. Most clients use a similar JSON format. Here's an example for Claude Code (`.mcp.json`):
+How you connect to the MCP server depends on your client (Claude Code, Cursor, VS Code, etc.). Check your client's docs for where to add MCP servers. Most clients use a similar JSON format. Here's an example for Claude Code (`.mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "my-api": {
       "type": "http",
-      "url": "http://localhost:3000/mcp",
+      "url": "http://localhost:3000",
       "headers": {
         "Authorization": "Bearer <your-token>"
       }
@@ -72,19 +89,19 @@ How you connect to the MCP server depends on your client (Claude Code, Cursor, V
 }
 ```
 
-The `headers` block above shows a `Bearer` token, but you can use any header your API requires. The MCP server forwards all headers from your client config to the target API on every tool call without modification — it doesn't validate, store, or care which header is "the auth header". See [Auth](#auth) for examples (API key, Bearer token, multiple headers).
+Use whatever headers your API requires. See [Auth](#auth).
 
 ## Deploying to Vercel
 
 1. Push this repo to GitHub
 2. Import it at [vercel.com/new](https://vercel.com/new)
-3. Add `OPENAPI_SPEC_URL` under **Settings > Environment Variables**. `API_BASE_URL` and `MCP_SERVER_NAME` are optional overrides.
+3. Add `OPENAPI_SPEC_URL` under **Settings > Environment Variables**. The other variables in [Configuration](#configuration) are optional.
 
-That's it. Your MCP server is live at `https://your-project.vercel.app/mcp`. Connect clients the same way as [local](#4-connect-your-mcp-client-to-the-local-server) — just swap the URL.
+That's it. Your MCP server is live at `https://your-project.vercel.app` (or a custom domain like `mcp.example.com`). Connect clients the same way as [local](#4-connect-your-mcp-client-to-the-local-server), just swap the URL.
 
 ## Auth
 
-All headers from your MCP client config are forwarded to the target API on every tool call. The MCP server does not validate or store credentials — your API handles authentication.
+All headers from your MCP client config are forwarded to the target API on every tool call. The MCP server does not validate or store credentials. Your API handles authentication.
 
 Configure whatever headers your API expects in the client config:
 

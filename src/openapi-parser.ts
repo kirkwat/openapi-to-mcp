@@ -1,23 +1,40 @@
-import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import { readFile } from 'node:fs/promises';
+
+import type { ToolAnnotations } from '@modelcontextprotocol/server';
 import type { OpenAPIV3 } from 'openapi-types';
 import { parse as parseYaml } from 'yaml';
-import { z, type ZodType } from 'zod';
 
 import type { ParamSource } from './api-client.js';
 import { getEnv } from './config.js';
-import { jsonSchemaToZod } from './schema-to-zod.js';
 
-export interface ToolDefinition {
+interface ToolDefinition {
   name: string;
+  title?: string;
   description: string;
-  inputSchema: Record<string, ZodType>;
+  inputSchema: Record<string, unknown>;
   method: string;
   path: string;
   paramSources: ParamSource[];
   annotations: ToolAnnotations;
 }
 
+const MAX_NAME_LENGTH = 128;
+
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
+
+// False values stay explicit: MCP defaults to destructive and non-idempotent.
+const ANNOTATIONS: Record<(typeof HTTP_METHODS)[number], ToolAnnotations> = {
+  get: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  post: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  put: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  patch: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  delete: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+};
+
+// Keys whose value is a map of name → schema (not itself a schema).
+const SCHEMA_MAP_KEYS = new Set(['properties', 'patternProperties', '$defs']);
+// Keys whose value is instance data, never a schema.
+const DATA_KEYS = new Set(['enum', 'const', 'default', 'examples']);
 
 /**
  * Converts an operation summary like "Create Audience" to a tool name like "create_audience".
@@ -27,8 +44,7 @@ function summaryToToolName(summary: string) {
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, '')
     .trim()
-    .replace(/\s+/g, '_')
-    .slice(0, 64);
+    .replace(/\s+/g, '_');
 }
 
 /**
@@ -45,25 +61,31 @@ function fallbackToolName(method: string, path: string) {
       }
       return seg;
     });
-  return `${method}_${segments.join('_')}`.slice(0, 64);
+  return `${method}_${segments.join('_')}`;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/**
- * Resolves all $ref references in a schema inline.
- */
+function isOpenAPIDocument(
+  v: unknown,
+): v is OpenAPIV3.Document<{ 'x-mcp-destructive'?: unknown }> {
+  return (
+    isRecord(v) &&
+    typeof v.openapi === 'string' &&
+    v.openapi.startsWith('3.') &&
+    isRecord(v.info)
+  );
+}
+
 function resolveRefs(
   obj: unknown,
-  spec: OpenAPIV3.Document,
+  root: unknown,
   visited = new Set<string>(),
 ): unknown {
-  if (obj === null || typeof obj !== 'object') return obj;
-
   if (Array.isArray(obj)) {
-    return obj.map((item) => resolveRefs(item, spec, visited));
+    return obj.map((item) => resolveRefs(item, root, visited));
   }
 
   if (!isRecord(obj)) return obj;
@@ -73,32 +95,87 @@ function resolveRefs(
     if (visited.has(ref)) return { type: 'object' };
 
     const parts = ref.replace('#/', '').split('/');
-    let resolved: unknown = spec;
+    let resolved: unknown = root;
     for (const part of parts) {
       if (!isRecord(resolved)) break;
       resolved = resolved[part];
     }
     const nextVisited = new Set(visited);
     nextVisited.add(ref);
-    return resolveRefs(resolved, spec, nextVisited);
+    return resolveRefs(resolved, root, nextVisited);
   }
 
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
-    result[key] = resolveRefs(value, spec, visited);
+    result[key] = resolveRefs(value, root, visited);
   }
   return result;
 }
 
-/**
- * Loads the OpenAPI spec from a URL or local file path (YAML or JSON).
- */
-async function loadSpec() {
-  const { OPENAPI_SPEC_URL: specUrl } = getEnv();
+// OpenAPI 3.0 keywords → JSON Schema 2020-12.
+function normalizeSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(normalizeSchema);
+  if (!isRecord(schema)) return schema;
 
-  // Support local file paths for development
+  const {
+    nullable,
+    example,
+    discriminator: _discriminator,
+    xml: _xml,
+    externalDocs: _externalDocs,
+    ...rest
+  } = schema;
+
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(rest)) {
+    if (DATA_KEYS.has(key)) {
+      result[key] = value;
+    } else if (SCHEMA_MAP_KEYS.has(key) && isRecord(value)) {
+      result[key] = Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [k, normalizeSchema(v)]),
+      );
+    } else {
+      result[key] = normalizeSchema(value);
+    }
+  }
+
+  if (example !== undefined && result.examples === undefined) {
+    result.examples = [example];
+  }
+
+  for (const [exclusive, bound] of [
+    ['exclusiveMinimum', 'minimum'],
+    ['exclusiveMaximum', 'maximum'],
+  ] as const) {
+    if (typeof result[exclusive] !== 'boolean') continue;
+    if (result[exclusive] && typeof result[bound] === 'number') {
+      result[exclusive] = result[bound];
+      delete result[bound];
+    } else {
+      delete result[exclusive];
+    }
+  }
+
+  if (nullable !== true) return result;
+  // x-mcp-header requires a single primitive type, which null breaks
+  delete result['x-mcp-header'];
+  if (
+    typeof result.type !== 'string' ||
+    'allOf' in result ||
+    'oneOf' in result ||
+    'anyOf' in result
+  ) {
+    return { anyOf: [result, { type: 'null' }] };
+  }
+  result.type = [result.type, 'null'];
+  if (Array.isArray(result.enum) && !result.enum.includes(null)) {
+    result.enum = [...result.enum, null];
+  }
+  return result;
+}
+
+async function loadSpec(specUrl: string) {
   if (specUrl.startsWith('/') || specUrl.startsWith('file://')) {
-    const { readFile } = await import('node:fs/promises');
     const filePath = specUrl.replace('file://', '');
     return readFile(filePath, 'utf-8');
   }
@@ -112,127 +189,130 @@ async function loadSpec() {
   return response.text();
 }
 
-/**
- * Fetches the OpenAPI spec and generates MCP tool definitions.
- */
 export async function parseOpenAPISpec() {
-  const specText = await loadSpec();
-  const rawSpec = parseYaml(specText) as OpenAPIV3.Document;
+  const { OPENAPI_SPEC_URL, MCP_TOOL_PREFIX = '' } = getEnv();
+  const rawSpec: unknown = parseYaml(await loadSpec(OPENAPI_SPEC_URL));
 
-  // Resolve all $refs inline
-  const spec = resolveRefs(rawSpec, rawSpec) as OpenAPIV3.Document;
+  const spec = resolveRefs(rawSpec, rawSpec);
+  if (!isOpenAPIDocument(spec)) {
+    throw new Error('OPENAPI_SPEC_URL must point to an OpenAPI 3.x document');
+  }
+
+  // OpenAPI 3.1 schemas are already JSON Schema 2020-12
+  const toJsonSchema = spec.openapi.startsWith('3.0')
+    ? normalizeSchema
+    : (schema: unknown) => schema;
 
   const tools: ToolDefinition[] = [];
   const usedNames = new Set<string>();
 
   for (const [path, pathItem] of Object.entries(spec.paths ?? {})) {
+    if (!pathItem) continue;
     for (const method of HTTP_METHODS) {
-      const operation = pathItem?.[method];
+      const operation = pathItem[method];
       if (!operation) continue;
 
-      // Generate tool name
-      let name = operation.summary
-        ? summaryToToolName(operation.summary)
-        : fallbackToolName(method, path);
+      const baseName =
+        operation.operationId ||
+        (operation.summary && summaryToToolName(operation.summary)) ||
+        fallbackToolName(method, path);
+      let name = `${MCP_TOOL_PREFIX}${baseName}`
+        .replace(/[^A-Za-z0-9_.-]/g, '_')
+        .slice(0, MAX_NAME_LENGTH);
 
       // Deduplicate names
-      if (usedNames.has(name)) {
-        let counter = 2;
-        while (usedNames.has(`${name}_${counter}`)) counter++;
-        name = `${name}_${counter}`;
+      const uniqueBase = name;
+      for (let counter = 2; usedNames.has(name); counter++) {
+        const suffix = `_${counter}`;
+        name = uniqueBase.slice(0, MAX_NAME_LENGTH - suffix.length) + suffix;
       }
       usedNames.add(name);
 
-      // Build description
-      let description = operation.summary ?? '';
-      if (
-        operation.description &&
-        operation.description !== operation.summary
-      ) {
-        description += description
-          ? `. ${operation.description}`
-          : operation.description;
-      }
+      const description = [
+        operation.summary,
+        operation.description !== operation.summary && operation.description,
+      ]
+        .filter(Boolean)
+        .join('. ');
 
-      // Collect param sources and build flat Zod shape
       const paramSources: ParamSource[] = [];
-      const shape: Record<string, ZodType> = {};
+      const properties: Record<string, unknown> = {};
+      const required: string[] = [];
 
-      // Path and query parameters
-      for (const rawParam of operation.parameters ?? []) {
-        if ('$ref' in rawParam) continue;
-        const param = rawParam;
-        if (param.in === 'header' || param.in === 'cookie') continue;
+      // Operation-level params override path-level ones
+      const parameters = new Map<string, OpenAPIV3.ParameterObject>();
+      for (const param of [
+        ...(pathItem.parameters ?? []),
+        ...(operation.parameters ?? []),
+      ]) {
+        if (!('$ref' in param))
+          parameters.set(`${param.in}:${param.name}`, param);
+      }
+      for (const param of parameters.values()) {
+        if (param.in !== 'path' && param.in !== 'query') continue;
 
-        paramSources.push({
-          name: param.name,
-          in: param.in as 'path' | 'query',
-        });
+        paramSources.push({ name: param.name, in: param.in });
 
-        if (param.schema) {
-          let fieldSchema = jsonSchemaToZod(param.schema);
-          if (param.description) {
-            fieldSchema = fieldSchema.describe(param.description);
-          }
-          if (!param.required) {
-            fieldSchema = fieldSchema.optional();
-          }
-          shape[param.name] = fieldSchema;
-        } else {
-          shape[param.name] = param.required
-            ? z.string()
-            : z.string().optional();
-        }
+        const schema = toJsonSchema(param.schema ?? { type: 'string' });
+        properties[param.name] =
+          param.description && isRecord(schema)
+            ? { ...schema, description: param.description }
+            : schema;
+        if (param.required) required.push(param.name);
       }
 
-      // Request body — inline properties into the flat shape
-      const requestBody = operation.requestBody;
-      const bodySchema =
-        requestBody && !('$ref' in requestBody)
-          ? requestBody.content?.['application/json']?.schema
+      const requestBody =
+        operation.requestBody && !('$ref' in operation.requestBody)
+          ? operation.requestBody
           : undefined;
+      const bodySchema = toJsonSchema(
+        requestBody?.content?.['application/json']?.schema,
+      );
 
-      if (bodySchema && !('$ref' in bodySchema)) {
-        if (bodySchema.properties) {
-          const requiredFields = new Set(bodySchema.required ?? []);
+      if (isRecord(bodySchema) && isRecord(bodySchema.properties)) {
+        const bodyRequired = Array.isArray(bodySchema.required)
+          ? bodySchema.required
+          : [];
 
-          for (const [propName, propSchema] of Object.entries(
-            bodySchema.properties,
-          )) {
-            paramSources.push({ name: propName, in: 'body' });
-
-            let fieldSchema = jsonSchemaToZod(propSchema);
-            if (!requiredFields.has(propName)) {
-              fieldSchema = fieldSchema.optional();
-            }
-            shape[propName] = fieldSchema;
-          }
-        } else {
-          // Non-object body — put under "body" key
-          paramSources.push({ name: 'body', in: 'body' });
-          shape['body'] = jsonSchemaToZod(bodySchema);
+        for (const [propName, propSchema] of Object.entries(
+          bodySchema.properties,
+        )) {
+          properties[propName] = propSchema;
+          if (bodyRequired.includes(propName)) required.push(propName);
         }
+      } else if (bodySchema !== undefined) {
+        paramSources.push({ name: 'body', in: 'rawBody' });
+        properties['body'] = bodySchema;
+        if (requestBody?.required) required.push('body');
       }
 
-      // Annotations based on HTTP method
-      const annotations: ToolDefinition['annotations'] = {};
-      if (method === 'get') {
-        annotations.readOnlyHint = true;
-      } else if (method === 'delete') {
-        annotations.destructiveHint = true;
-      }
+      const destructiveOverride = operation['x-mcp-destructive'];
 
       tools.push({
         name,
+        title: operation.summary,
         description,
-        inputSchema: shape,
+        inputSchema: {
+          type: 'object',
+          properties,
+          required: [...new Set(required)],
+          additionalProperties: false,
+        },
         method: method.toUpperCase(),
         path,
         paramSources,
-        annotations,
+        annotations: {
+          ...ANNOTATIONS[method],
+          ...(typeof destructiveOverride === 'boolean' && {
+            destructiveHint: destructiveOverride,
+          }),
+          openWorldHint: false,
+        },
       });
     }
   }
+
+  tools.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   return { tools, spec };
 }

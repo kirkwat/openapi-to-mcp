@@ -1,118 +1,105 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ParamSource } from '../src/api-client.js';
-
-// Mock config before importing api-client
-vi.mock('../src/config.js', () => ({
-  getConfig: () => ({ apiBaseUrl: 'https://api.test.com' }),
-}));
-
-const { callApi } = await import('../src/api-client.js');
+import { callApi } from '../src/api-client.js';
 
 describe('callApi', () => {
-  const mockFetch = vi.fn();
+  const mockFetch = vi.fn<typeof fetch>();
 
   beforeEach(() => {
     mockFetch.mockReset();
+    mockFetch.mockImplementation(async () => Response.json({}));
     vi.stubGlobal('fetch', mockFetch);
   });
 
-  function jsonResponse(data: unknown, status = 200) {
-    return new Response(JSON.stringify(data), {
-      status,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  function headers(entries: Record<string, string> = {}) {
-    return new Headers(entries);
-  }
-
   it('substitutes path params and encodes them', async () => {
-    mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }));
-
-    const sources: ParamSource[] = [{ name: 'id', in: 'path' }];
     await callApi(
       'GET',
+      'http://x',
       '/items/{id}',
-      headers(),
+      new Headers(),
       { id: 'hello world' },
-      sources,
+      [{ name: 'id', in: 'path' }],
     );
 
-    const url = mockFetch.mock.calls[0][0];
-    expect(url).toContain('/items/hello%20world');
+    expect(mockFetch.mock.calls[0][0]).toBe('http://x/items/hello%20world');
   });
 
   it('throws on missing required path param', async () => {
-    const sources: ParamSource[] = [{ name: 'id', in: 'path' }];
     await expect(
-      callApi('GET', '/items/{id}', headers(), {}, sources),
+      callApi('GET', 'http://x', '/items/{id}', new Headers(), {}, [
+        { name: 'id', in: 'path' },
+      ]),
     ).rejects.toThrow('Missing required path parameter: id');
   });
 
-  it('appends query params to URL', async () => {
-    mockFetch.mockResolvedValueOnce(jsonResponse([]));
-
-    const sources: ParamSource[] = [{ name: 'limit', in: 'query' }];
-    await callApi('GET', '/items', headers(), { limit: 10 }, sources);
-
-    const url = mockFetch.mock.calls[0][0];
-    expect(url).toContain('limit=10');
-  });
-
-  it('sends body for POST requests', async () => {
-    mockFetch.mockResolvedValueOnce(jsonResponse({ id: '1' }));
-
-    const sources: ParamSource[] = [
-      { name: 'id', in: 'path' },
-      { name: 'name', in: 'body' },
-    ];
-    await callApi(
-      'POST',
-      '/items/{id}',
-      headers(),
-      { id: '1', name: 'Test' },
-      sources,
-    );
-
-    const opts = mockFetch.mock.calls[0][1];
-    expect(opts.method).toBe('POST');
-    expect(JSON.parse(opts.body)).toEqual({ name: 'Test' });
-    expect(opts.headers.get('Content-Type')).toBe('application/json');
-  });
-
-  it('does not send body for GET requests', async () => {
-    mockFetch.mockResolvedValueOnce(jsonResponse([]));
-
-    const sources: ParamSource[] = [{ name: 'extra', in: 'body' }];
-    await callApi('GET', '/items', headers(), { extra: 'ignored' }, sources);
-
-    const opts = mockFetch.mock.calls[0][1];
-    expect(opts.body).toBeUndefined();
-  });
-
-  it('forwards client headers to the target API', async () => {
-    mockFetch.mockResolvedValueOnce(jsonResponse({}));
-
+  it('substitutes placeholders in the path only, never the base URL', async () => {
     await callApi(
       'GET',
-      '/items',
-      headers({ 'X-Api-Key': 'my-secret', Authorization: 'Bearer tok123' }),
-      {},
+      'https://{tenant}.x',
+      '/tenants/{tenant}',
+      new Headers(),
+      { tenant: 'acme' },
+      [{ name: 'tenant', in: 'path' }],
+    );
+
+    expect(mockFetch.mock.calls[0][0]).toBe('https://{tenant}.x/tenants/acme');
+  });
+
+  it('keeps the base URL path', async () => {
+    await callApi(
+      'GET',
+      'https://api.test.com/v1',
+      '/items/{id}',
+      new Headers(),
+      { id: '7' },
+      [{ name: 'id', in: 'path' }],
+    );
+
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.test.com/v1/items/7');
+  });
+
+  it('sends a rawBody param as the whole request body', async () => {
+    await callApi(
+      'POST',
+      'http://x',
+      '/bulk',
+      new Headers(),
+      { body: [{ name: 'a' }] },
+      [{ name: 'body', in: 'rawBody' }],
+    );
+
+    const init = mockFetch.mock.calls[0][1];
+    expect(JSON.parse(String(init?.body))).toEqual([{ name: 'a' }]);
+    expect(new Headers(init?.headers).get('Content-Type')).toBe(
+      'application/json',
+    );
+  });
+
+  it('keeps an object body property named "body" wrapped', async () => {
+    await callApi(
+      'POST',
+      'http://x',
+      '/',
+      new Headers(),
+      { body: 'hello' },
       [],
     );
 
-    const opts = mockFetch.mock.calls[0][1];
-    expect(opts.headers.get('X-Api-Key')).toBe('my-secret');
-    expect(opts.headers.get('Authorization')).toBe('Bearer tok123');
+    const init = mockFetch.mock.calls[0][1];
+    expect(JSON.parse(String(init?.body))).toEqual({ body: 'hello' });
   });
 
-  it('throws on non-2xx response', async () => {
-    mockFetch.mockResolvedValueOnce(new Response('Not Found', { status: 404 }));
+  it('does not send body for GET requests', async () => {
+    await callApi('GET', 'http://x', '/', new Headers(), { extra: 'x' }, []);
 
-    await expect(callApi('GET', '/items', headers(), {}, [])).rejects.toThrow(
-      'API returned 404: Not Found',
-    );
+    expect(mockFetch.mock.calls[0][1]?.body).toBeUndefined();
+  });
+
+  it('returns the upstream body text unchanged', async () => {
+    mockFetch.mockImplementationOnce(async () => new Response('{ "a": 1 }\n'));
+
+    await expect(
+      callApi('GET', 'http://x', '/', new Headers(), {}, []),
+    ).resolves.toBe('{ "a": 1 }\n');
   });
 });
