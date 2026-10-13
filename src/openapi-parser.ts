@@ -15,6 +15,8 @@ interface ToolDefinition {
   method: string;
   path: string;
   paramSources: ParamSource[];
+  // Media type the body was declared with, e.g. application/merge-patch+json
+  bodyContentType?: string;
   annotations: ToolAnnotations;
 }
 
@@ -37,7 +39,7 @@ const SCHEMA_MAP_KEYS = new Set(['properties', 'patternProperties', '$defs']);
 const DATA_KEYS = new Set(['enum', 'const', 'default', 'examples']);
 
 /**
- * Converts an operation summary like "Create Audience" to a tool name like "create_audience".
+ * Converts an operation summary like "Create Widget" to a tool name like "create_widget".
  */
 function summaryToToolName(summary: string) {
   return summary
@@ -49,7 +51,7 @@ function summaryToToolName(summary: string) {
 
 /**
  * Generates a fallback tool name from method + path.
- * e.g., GET /audiences/{id} → "get_audiences_by_id"
+ * e.g., GET /widgets/{id} → "get_widgets_by_id"
  */
 function fallbackToolName(method: string, path: string) {
   const segments = path
@@ -68,9 +70,18 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+type OperationExtensions = {
+  'x-mcp'?: unknown;
+  'x-mcp-description'?: unknown;
+  'x-mcp-destructive'?: unknown;
+  'x-mcp-readonly'?: unknown;
+};
+
 function isOpenAPIDocument(
   v: unknown,
-): v is OpenAPIV3.Document<{ 'x-mcp-destructive'?: unknown }> {
+): v is OpenAPIV3.Document<OperationExtensions> & {
+  paths: OpenAPIV3.PathsObject<OperationExtensions, { 'x-mcp'?: unknown }>;
+} {
   return (
     isRecord(v) &&
     typeof v.openapi === 'string' &&
@@ -82,10 +93,11 @@ function isOpenAPIDocument(
 function resolveRefs(
   obj: unknown,
   root: unknown,
+  warned: Set<string>,
   visited = new Set<string>(),
 ): unknown {
   if (Array.isArray(obj)) {
-    return obj.map((item) => resolveRefs(item, root, visited));
+    return obj.map((item) => resolveRefs(item, root, warned, visited));
   }
 
   if (!isRecord(obj)) return obj;
@@ -94,22 +106,71 @@ function resolveRefs(
     const ref = obj['$ref'];
     if (visited.has(ref)) return { type: 'object' };
 
-    const parts = ref.replace('#/', '').split('/');
-    let resolved: unknown = root;
-    for (const part of parts) {
-      if (!isRecord(resolved)) break;
-      resolved = resolved[part];
+    // Only local refs resolve; external files ("other.yaml#/Foo") fall through
+    let resolved: unknown = ref.startsWith('#/') ? root : undefined;
+    for (const part of ref.slice(2).split('/')) {
+      // Arrays too: pointers index them ("parameters/0")
+      if (typeof resolved !== 'object' || resolved === null) break;
+      let key = part;
+      try {
+        key = decodeURIComponent(part);
+      } catch {} // Malformed %-escape: use the raw segment
+      // RFC 6901: unescape ~1 before ~0 so "~01" becomes "~1", not "/"
+      key = key.replaceAll('~1', '/').replaceAll('~0', '~');
+      resolved = Object.hasOwn(resolved, key)
+        ? Reflect.get(resolved, key)
+        : undefined;
+    }
+    if (!isRecord(resolved)) {
+      if (!warned.has(ref)) console.error(`Unresolvable $ref ${ref}`);
+      warned.add(ref);
+      return {};
     }
     const nextVisited = new Set(visited);
     nextVisited.add(ref);
-    return resolveRefs(resolved, root, nextVisited);
+    return resolveRefs(resolved, root, warned, nextVisited);
   }
 
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
-    result[key] = resolveRefs(value, root, visited);
+    result[key] = resolveRefs(value, root, warned, visited);
   }
   return result;
+}
+
+function isArraySchema(schema: unknown) {
+  return isRecord(schema) && [schema.type].flat().includes('array');
+}
+
+// e.g. "Returns: widgets[], page, total" or "Returns: array of id, name"
+// First JSON entry of a content map, accepting charset params and +json suffixes
+function jsonContent(content: Record<string, OpenAPIV3.MediaTypeObject> = {}) {
+  return Object.entries(content).find(([type]) => {
+    const base = type.split(';')[0].trim().toLowerCase();
+    return base === 'application/json' || base.endsWith('+json');
+  });
+}
+
+function describeResponse(operation: OpenAPIV3.OperationObject) {
+  const schema = ['200', '201', '2XX']
+    .map((code) => {
+      const res = operation.responses?.[code];
+      return res && !('$ref' in res)
+        ? jsonContent(res.content)?.[1].schema
+        : undefined;
+    })
+    .find(Boolean);
+
+  const isArray = isArraySchema(schema);
+  const shape = isArray && isRecord(schema) ? schema.items : schema;
+  if (!isRecord(shape) || !isRecord(shape.properties)) return undefined;
+  const fields = Object.entries(shape.properties)
+    // Bound token cost
+    .slice(0, 8)
+    .map(([key, prop]) => key + (isArraySchema(prop) ? '[]' : ''));
+  return fields.length > 0
+    ? `Returns: ${isArray ? 'array of ' : ''}${fields.join(', ')}`
+    : undefined;
 }
 
 // OpenAPI 3.0 keywords → JSON Schema 2020-12.
@@ -190,10 +251,15 @@ async function loadSpec(specUrl: string) {
 }
 
 export async function parseOpenAPISpec() {
-  const { OPENAPI_SPEC_URL, MCP_TOOL_PREFIX = '' } = getEnv();
+  const {
+    OPENAPI_SPEC_URL,
+    MCP_TOOL_PREFIX = '',
+    MCP_TAGS,
+    MCP_READ_ONLY,
+  } = getEnv();
   const rawSpec: unknown = parseYaml(await loadSpec(OPENAPI_SPEC_URL));
 
-  const spec = resolveRefs(rawSpec, rawSpec);
+  const spec = resolveRefs(rawSpec, rawSpec, new Set());
   if (!isOpenAPIDocument(spec)) {
     throw new Error('OPENAPI_SPEC_URL must point to an OpenAPI 3.x document');
   }
@@ -202,15 +268,46 @@ export async function parseOpenAPISpec() {
   const toJsonSchema = spec.openapi.startsWith('3.0')
     ? normalizeSchema
     : (schema: unknown) => schema;
+  // "A,B,-C": keep operations tagged A or B, drop any tagged C
+  const tagList = (MCP_TAGS ?? '').split(',').map((t) => t.trim());
+  const includeTags = tagList.filter((t) => t && !t.startsWith('-'));
+  const excludeTags = tagList
+    .filter((t) => t.startsWith('-'))
+    .map((t) => t.slice(1));
 
   const tools: ToolDefinition[] = [];
   const usedNames = new Set<string>();
+  let operationCount = 0;
 
   for (const [path, pathItem] of Object.entries(spec.paths ?? {})) {
     if (!pathItem) continue;
     for (const method of HTTP_METHODS) {
       const operation = pathItem[method];
       if (!operation) continue;
+      operationCount++;
+
+      const enabled = operation['x-mcp'] ?? pathItem['x-mcp'];
+      const tags = operation.tags ?? [];
+      const destructive = operation['x-mcp-destructive'];
+      const readOnly = operation['x-mcp-readonly'];
+      const annotations: ToolAnnotations = {
+        ...ANNOTATIONS[method],
+        ...(readOnly === true && ANNOTATIONS.get),
+        ...(typeof destructive === 'boolean' && {
+          destructiveHint: destructive,
+        }),
+        openWorldHint: false,
+      };
+      if (
+        enabled === false ||
+        (includeTags.length > 0 &&
+          !tags.some((tag) => includeTags.includes(tag))) ||
+        tags.some((tag) => excludeTags.includes(tag)) ||
+        (MCP_READ_ONLY &&
+          (!annotations.readOnlyHint || annotations.destructiveHint))
+      ) {
+        continue;
+      }
 
       const baseName =
         operation.operationId ||
@@ -228,12 +325,22 @@ export async function parseOpenAPISpec() {
       }
       usedNames.add(name);
 
-      const description = [
+      const override = operation['x-mcp-description'];
+      const details =
+        operation.description ||
+        [`${method.toUpperCase()} ${path}`, describeResponse(operation)]
+          .filter(Boolean)
+          .join('. ');
+      const defaultDescription = [
         operation.summary,
-        operation.description !== operation.summary && operation.description,
+        details !== operation.summary && details,
       ]
         .filter(Boolean)
         .join('. ');
+      const description =
+        typeof override === 'string' && override.trim()
+          ? override
+          : defaultDescription;
 
       const paramSources: ParamSource[] = [];
       const properties: Record<string, unknown> = {};
@@ -265,9 +372,8 @@ export async function parseOpenAPISpec() {
         operation.requestBody && !('$ref' in operation.requestBody)
           ? operation.requestBody
           : undefined;
-      const bodySchema = toJsonSchema(
-        requestBody?.content?.['application/json']?.schema,
-      );
+      const [bodyType, jsonBody] = jsonContent(requestBody?.content) ?? [];
+      const bodySchema = toJsonSchema(jsonBody?.schema);
 
       if (isRecord(bodySchema) && isRecord(bodySchema.properties)) {
         const bodyRequired = Array.isArray(bodySchema.required)
@@ -286,8 +392,6 @@ export async function parseOpenAPISpec() {
         if (requestBody?.required) required.push('body');
       }
 
-      const destructiveOverride = operation['x-mcp-destructive'];
-
       tools.push({
         name,
         title: operation.summary,
@@ -301,15 +405,14 @@ export async function parseOpenAPISpec() {
         method: method.toUpperCase(),
         path,
         paramSources,
-        annotations: {
-          ...ANNOTATIONS[method],
-          ...(typeof destructiveOverride === 'boolean' && {
-            destructiveHint: destructiveOverride,
-          }),
-          openWorldHint: false,
-        },
+        bodyContentType: bodyType?.split(';')[0].trim(),
+        annotations,
       });
     }
+  }
+
+  if (tools.length < operationCount) {
+    console.log(`Registered ${tools.length} of ${operationCount} operations`);
   }
 
   tools.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

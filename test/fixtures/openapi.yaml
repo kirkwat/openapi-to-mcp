@@ -180,8 +180,127 @@ paths:
       responses:
         '200':
           description: OK
+  /widgets:
+    get:
+      operationId: listWidgets
+      summary: List Widgets
+      tags: [Widget]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WidgetPage'
+    delete:
+      operationId: purgeWidgets
+      summary: Purge Widgets
+      tags: [Widget]
+      x-mcp: false
+      responses:
+        '204':
+          description: Purged
+  # Same summary as /widgets/history: dedupe must ignore filtered operations
+  /widgets/history-v0:
+    get:
+      summary: Widget History
+      tags: [Widget, Legacy]
+      responses:
+        '200':
+          description: OK
+  /widgets/history:
+    get:
+      summary: Widget History
+      tags: [Widget]
+      responses:
+        '2XX':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Widget'
+  /widgets/search:
+    post:
+      operationId: searchWidgets
+      summary: Search Widgets
+      tags: [Widget, Search]
+      x-mcp-readonly: true
+      x-mcp-description: Find widgets matching a query.
+      responses:
+        '200':
+          description: OK
+  /archive:
+    post:
+      operationId: archiveAll
+      x-mcp-readonly: true
+      x-mcp-destructive: true
+      responses:
+        '200':
+          description: OK
+  /internal:
+    x-mcp: false
+    get:
+      operationId: internalStatus
+      responses:
+        '200':
+          description: OK
+    post:
+      operationId: internalReindex
+      x-mcp: true
+      responses:
+        '202':
+          description: Accepted
+  # Escaped JSON pointers: ~1 is "/", %7B/%7D are percent-encoded braces
+  /items/{id}/labels:
+    parameters:
+      - $ref: '#/paths/~1items~1%7Bid%7D/get/parameters/0'
+      - $ref: '#/components/parameters/legacy~1rev~0v1'
+      - $ref: '#/components/parameters/Missing'
+    post:
+      operationId: addItemLabel
+      requestBody:
+        content:
+          application/json; charset=utf-8:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                source:
+                  $ref: 'other.yaml#/Missing'
+      responses:
+        '200':
+          description: OK
+  /items/{id}/merge:
+    patch:
+      operationId: mergeItem
+      parameters:
+        - $ref: '#/components/parameters/ItemId'
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+          application/merge-patch+json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                meta:
+                  $ref: 'other.yaml#/Missing'
+      responses:
+        '200':
+          description: OK
 components:
   parameters:
+    legacy/rev~v1:
+      name: rev
+      in: query
+      schema:
+        type: integer
     ItemId:
       name: id
       in: path
@@ -231,3 +350,25 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Item'
+    Widget:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    WidgetPage:
+      type: object
+      properties:
+        widgets:
+          type: array
+          items:
+            $ref: '#/components/schemas/Widget'
+        tags:
+          type: array
+          items:
+            type: string
+        page:
+          type: integer
+        total:
+          type: integer

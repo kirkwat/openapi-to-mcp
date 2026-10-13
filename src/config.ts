@@ -2,9 +2,9 @@ import type { OpenAPIV3 } from 'openapi-types';
 import { z } from 'zod';
 
 const envSchema = z.object({
-  OPENAPI_SPEC_URL: z.string().min(1, 'OPENAPI_SPEC_URL is required'),
+  OPENAPI_SPEC_URL: z.string({ error: 'OPENAPI_SPEC_URL is required' }),
   API_BASE_URL: z.url().optional(),
-  MCP_SERVER_NAME: z.string().min(1).optional(),
+  MCP_SERVER_NAME: z.string().optional(),
   MCP_TOOL_PREFIX: z
     .string()
     .regex(
@@ -13,10 +13,17 @@ const envSchema = z.object({
     )
     .optional(),
   PORT: z.coerce.number().int().positive().optional(),
+  MCP_TAGS: z.string().optional(),
+  MCP_READ_ONLY: z.stringbool().default(false),
+  MCP_MAX_RESPONSE_CHARS: z.coerce.number().int().nonnegative().default(40000),
 });
 
 export function getEnv() {
-  return envSchema.parse(process.env);
+  // `FOO=` means unset, not false or 0
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([, value]) => value?.trim()),
+  );
+  return envSchema.parse(env);
 }
 
 export function resolveConfig(spec: OpenAPIV3.Document) {
@@ -33,5 +40,6 @@ export function resolveConfig(spec: OpenAPIV3.Document) {
     apiBaseUrl: apiBaseUrl.replace(/\/$/, ''),
     serverName: env.MCP_SERVER_NAME || spec.info.title || 'OpenAPI MCP Server',
     serverVersion: spec.info.version || '1.0.0',
+    maxResponseChars: env.MCP_MAX_RESPONSE_CHARS,
   };
 }

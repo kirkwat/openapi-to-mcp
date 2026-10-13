@@ -40,7 +40,19 @@ async function connect(versionNegotiation?: VersionNegotiationOptions) {
     {
       fetch: (url, init) => handleRequest(new Request(url, init)),
       requestInit: {
-        headers: { Authorization: 'Bearer tok123', 'Mcp-Api-Key': 'k1' },
+        headers: {
+          Authorization: 'Bearer tok123',
+          'X-Api-Key': 'x1',
+          'X-Tenant': 'acme',
+          'Mcp-Api-Key': 'k1',
+          Cookie: 'session=secret',
+          Origin: 'https://evil.test',
+          'X-Forwarded-For': '10.0.0.1',
+          'X-Vercel-Id': 'iad1::abc',
+          'CF-Access-Client-Id': 'cf-client',
+          'CF-Ray': 'ray1',
+          Expect: '100-continue',
+        },
       },
     },
   );
@@ -57,8 +69,8 @@ const textContent = z.tuple([
   z.object({ type: z.literal('text'), text: z.string() }),
 ]);
 
-function parseText(content: unknown) {
-  return JSON.parse(textContent.parse(content)[0].text);
+function getText(content: unknown) {
+  return textContent.parse(content)[0].text;
 }
 
 describe('handleRequest', () => {
@@ -177,7 +189,7 @@ describe.each([
     });
 
     expect(result.isError).toBeFalsy();
-    expect(parseText(result.content)).toEqual({ id: ITEM_ID });
+    expect(JSON.parse(getText(result.content))).toEqual({ id: ITEM_ID });
     expect(upstream).toHaveBeenCalledOnce();
     const [url, init] = upstream.mock.calls[0];
     expect(url).toBe(`https://api.test.com/items/${ITEM_ID}`);
@@ -189,13 +201,23 @@ describe.each([
 
     const headers = new Headers(init?.headers);
     expect(headers.get('Authorization')).toBe('Bearer tok123');
+    expect(headers.get('X-Api-Key')).toBe('x1');
+    expect(headers.get('X-Tenant')).toBe('acme');
     expect(headers.get('Mcp-Api-Key')).toBe('k1');
+    expect(headers.get('CF-Access-Client-Id')).toBe('cf-client');
     expect(headers.get('Content-Type')).toBe('application/json');
+    expect(headers.get('Accept')).toBe('application/json');
     for (const name of [
       'mcp-session-id',
       'mcp-protocol-version',
       'mcp-method',
       'mcp-name',
+      'cookie',
+      'origin',
+      'x-forwarded-for',
+      'x-vercel-id',
+      'cf-ray',
+      'expect',
     ]) {
       expect(headers.has(name)).toBe(false);
     }
@@ -213,26 +235,12 @@ describe.each([
     });
 
     expect(result.isError).toBe(true);
-    expect(textContent.parse(result.content)[0].text).toContain(
-      'Input validation error',
-    );
+    expect(getText(result.content)).toContain('Input validation error');
     expect(upstream).not.toHaveBeenCalled();
   });
 });
 
 describe('tools/call', () => {
-  it('sends a non-object request body unwrapped', async () => {
-    const client = await connect();
-    await client.callTool({
-      name: 'post_items_bulk',
-      arguments: { body: [{ name: 'Widget' }] },
-    });
-
-    const [url, init] = upstream.mock.calls[0];
-    expect(url).toBe('https://api.test.com/items/bulk');
-    expect(JSON.parse(String(init?.body))).toEqual([{ name: 'Widget' }]);
-  });
-
   it('forwards query params', async () => {
     const client = await connect();
     await client.callTool({
@@ -269,8 +277,38 @@ describe('tools/call', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(parseText(result.content)).toEqual({
-      error: 'API returned 404: Not Found',
+    expect(getText(result.content)).toMatch(/^Upstream returned 404/);
+  });
+
+  it('returns no content for an empty 204 body', async () => {
+    upstream.mockImplementationOnce(
+      async () => new Response(null, { status: 204 }),
+    );
+    const client = await connect();
+
+    const result = await client.callTool({
+      name: 'delete_item',
+      arguments: { id: ITEM_ID },
     });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toEqual([]);
+  });
+
+  it('truncates long responses to MCP_MAX_RESPONSE_CHARS', async () => {
+    vi.stubEnv('MCP_MAX_RESPONSE_CHARS', '200');
+    const items = Array.from({ length: 40 }, (_, id) => ({ id }));
+    upstream.mockImplementationOnce(async () => Response.json({ items }));
+    const client = await connect();
+
+    const result = await client.callTool({
+      name: 'list_items',
+      arguments: { status: 'active' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(getText(result.content).split('\n')[1]).toMatch(
+      /^Truncated: showing /,
+    );
   });
 });

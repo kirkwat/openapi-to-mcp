@@ -17,10 +17,14 @@ async function getTool(name: string) {
 describe('parseOpenAPISpec', () => {
   beforeEach(() => {
     vi.stubEnv('OPENAPI_SPEC_URL', FIXTURE_PATH);
+    // The fixture's unresolvable refs log on every parse
+    vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
   });
 
   it('names tools and maps them to an HTTP method and path', async () => {
@@ -28,16 +32,24 @@ describe('parseOpenAPISpec', () => {
 
     expect(spec.info.title).toBe('Test API');
     expect(tools.map((t) => [t.name, t.method, t.path])).toEqual([
+      ['addItemLabel', 'POST', '/items/{id}/labels'],
+      ['archiveAll', 'POST', '/archive'],
       ['delete_item', 'DELETE', '/items/{id}'],
       ['getItem', 'GET', '/items/{id}'],
+      ['internalReindex', 'POST', '/internal'],
+      ['listWidgets', 'GET', '/widgets'],
       ['list_items', 'GET', '/items'],
       ['list_items_2', 'POST', '/reports/{reportId}'],
+      ['mergeItem', 'PATCH', '/items/{id}/merge'],
       ['patch_item', 'PATCH', '/items/{id}'],
       ['post_items_bulk', 'POST', '/items/bulk'],
       ['replace_item', 'PUT', '/items/{id}'],
       ['replace_report', 'PUT', '/reports/{reportId}'],
       ['reports_get_v1', 'GET', '/reports/{reportId}'],
+      ['searchWidgets', 'POST', '/widgets/search'],
       ['update_item', 'POST', '/items/{id}'],
+      ['widget_history', 'GET', '/widgets/history-v0'],
+      ['widget_history_2', 'GET', '/widgets/history'],
     ]);
     expect(tools.find((t) => t.name === 'getItem')?.title).toBe('Get Item');
     expect(
@@ -122,6 +134,49 @@ describe('parseOpenAPISpec', () => {
     expect(postReport.inputSchema.required).not.toContain('body');
   });
 
+  it('reads JSON bodies with media-type parameters or a +json suffix', async () => {
+    const addLabel = await getTool('addItemLabel');
+    expect(addLabel.inputSchema.properties).toHaveProperty('label');
+
+    const merge = await getTool('mergeItem');
+    expect(merge.inputSchema.properties).toMatchObject({
+      name: { type: 'string' },
+    });
+    expect(merge.paramSources).toEqual([{ name: 'id', in: 'path' }]);
+    // The declared media type is sent back upstream, minus parameters
+    expect(addLabel.bodyContentType).toBe('application/json');
+    expect(merge.bodyContentType).toBe('application/merge-patch+json');
+  });
+
+  it('resolves escaped JSON-pointer refs', async () => {
+    const addLabel = await getTool('addItemLabel');
+    expect(addLabel.paramSources).toEqual([
+      { name: 'id', in: 'path' },
+      { name: 'rev', in: 'query' },
+    ]);
+    expect(addLabel.inputSchema.properties).toMatchObject({
+      id: { type: 'string', format: 'uuid' },
+      rev: { type: 'integer' },
+    });
+  });
+
+  it('replaces unresolvable refs with {} and logs each once', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { tools } = await parseOpenAPISpec();
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+
+    expect(byName.addItemLabel.inputSchema.properties).toMatchObject({
+      source: {},
+    });
+    expect(byName.mergeItem.inputSchema.properties).toMatchObject({
+      meta: {},
+    });
+    expect(error.mock.calls).toEqual([
+      ['Unresolvable $ref #/components/parameters/Missing'],
+      ['Unresolvable $ref other.yaml#/Missing'],
+    ]);
+  });
+
   it('keeps an object body property named "body" as a body field', async () => {
     const replaceReport = await getTool('replace_report');
     expect(replaceReport.paramSources).not.toContainEqual({
@@ -172,43 +227,125 @@ describe('parseOpenAPISpec', () => {
     );
   });
 
-  it('sets all four annotations per HTTP method', async () => {
+  it('synthesizes a description when the spec has none', async () => {
     const { tools } = await parseOpenAPISpec();
-    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    const descriptions = Object.fromEntries(
+      tools.map((t) => [t.name, t.description]),
+    );
 
-    expect(byName['list_items']!.annotations).toEqual({
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false,
-    });
-    expect(byName['update_item']!.annotations).toEqual({
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: false,
-    });
-    expect(byName['replace_item']!.annotations).toEqual({
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: true,
-      openWorldHint: false,
-    });
-    expect(byName['delete_item']!.annotations).toEqual({
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: true,
-      openWorldHint: false,
+    expect(descriptions).toMatchObject({
+      list_items: 'List Items. Returns a list of items',
+      getItem: 'Get Item. GET /items/{id}',
+      reports_get_v1: 'GET /reports/{reportId}',
+      listWidgets:
+        'List Widgets. GET /widgets. Returns: widgets[], tags[], page, total',
+      widget_history_2:
+        'Widget History. GET /widgets/history. Returns: array of id, name',
+      searchWidgets: 'Find widgets matching a query.',
     });
   });
 
-  it('lets x-mcp-destructive override destructiveHint', async () => {
-    const patchItem = await getTool('patch_item');
-    expect(patchItem.annotations).toEqual({
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
+  it('skips operations marked x-mcp: false and logs the count', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { tools } = await parseOpenAPISpec();
+    const names = tools.map((t) => t.name);
+
+    expect(names).not.toContain('purgeWidgets');
+    expect(names).not.toContain('internalStatus');
+    expect(names).toContain('internalReindex');
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(/^Registered \d+ of \d+ operations$/),
+    );
+  });
+
+  it('logs nothing when no operation is filtered', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubEnv('OPENAPI_SPEC_URL', 'https://spec.test/openapi.json');
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        openapi: '3.0.3',
+        info: { title: 'Mini', version: '1' },
+        paths: {
+          '/a': { get: { responses: { '200': { description: 'OK' } } } },
+        },
+      }),
+    );
+
+    const { tools } = await parseOpenAPISpec();
+    expect(tools.map((t) => t.name)).toEqual(['get_a']);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('filters by MCP_TAGS, with a - prefix excluding', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubEnv('MCP_TAGS', ' Widget ,Search');
+    let { tools } = await parseOpenAPISpec();
+    expect(tools.map((t) => t.name)).toEqual([
+      'listWidgets',
+      'searchWidgets',
+      'widget_history',
+      'widget_history_2',
+    ]);
+
+    vi.stubEnv('MCP_TAGS', '-Legacy,-Search');
+    ({ tools } = await parseOpenAPISpec());
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('list_items');
+    expect(names).not.toContain('searchWidgets');
+    // The filtered collision no longer claims the base name
+    expect(tools.find((t) => t.name === 'widget_history')?.path).toBe(
+      '/widgets/history',
+    );
+    expect(names).not.toContain('widget_history_2');
+
+    vi.stubEnv('MCP_TAGS', 'Widget,-Legacy,-Search');
+    ({ tools } = await parseOpenAPISpec());
+    expect(tools.map((t) => t.name)).toEqual(['listWidgets', 'widget_history']);
+  });
+
+  it('keeps only read-only operations when MCP_READ_ONLY is set', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubEnv('MCP_READ_ONLY', 'true');
+    const { tools } = await parseOpenAPISpec();
+
+    // archiveAll is read-only but destructive, so it is dropped too
+    expect(tools.map((t) => t.name)).toEqual([
+      'getItem',
+      'listWidgets',
+      'list_items',
+      'reports_get_v1',
+      'searchWidgets',
+      'widget_history',
+      'widget_history_2',
+    ]);
+  });
+
+  it('derives annotations from the method and x-mcp-* overrides', async () => {
+    const { tools } = await parseOpenAPISpec();
+    const annotations = Object.fromEntries(
+      tools.map((t) => [t.name, t.annotations]),
+    );
+    const hints = (
+      readOnlyHint: boolean,
+      destructiveHint: boolean,
+      idempotentHint: boolean,
+    ) => ({
+      readOnlyHint,
+      destructiveHint,
+      idempotentHint,
       openWorldHint: false,
+    });
+
+    expect(annotations).toMatchObject({
+      list_items: hints(true, false, true),
+      update_item: hints(false, false, false),
+      replace_item: hints(false, true, true),
+      // PATCH is destructive by default; x-mcp-destructive: false overrides
+      patch_item: hints(false, false, false),
+      delete_item: hints(false, true, true),
+      // x-mcp-readonly: true on a POST
+      searchWidgets: hints(true, false, true),
+      archiveAll: hints(true, true, true),
     });
   });
 

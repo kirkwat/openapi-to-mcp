@@ -40,7 +40,7 @@ function getTools() {
   return toolsPromise;
 }
 
-// Transport and MCP protocol headers never reach the target API.
+// Transport, protocol, browser and proxy headers never reach the target API.
 const STRIPPED_HEADERS = new Set([
   'host',
   'content-length',
@@ -49,16 +49,42 @@ const STRIPPED_HEADERS = new Set([
   'accept-encoding',
   'connection',
   'keep-alive',
+  'expect',
+  'upgrade',
+  'te',
+  'proxy-connection',
+  'proxy-authorization',
+  'http2-settings',
+  'forwarded',
+  'via',
+  'origin',
+  'referer',
+  'cookie',
+  'user-agent',
+  'x-real-ip',
+  // Cloudflare-injected; CF-Access-Client-* auth headers still pass.
+  'cf-connecting-ip',
+  'cf-ipcountry',
+  'cf-ray',
+  'cf-visitor',
+  'cf-worker',
+  'cf-ew-via',
+  'cdn-loop',
   'mcp-session-id',
   'mcp-protocol-version',
   'mcp-method',
   'mcp-name',
 ]);
+// Other mcp-* headers (e.g. a custom Mcp-Api-Key) still pass through.
+const STRIPPED_PREFIXES = ['mcp-param-', 'x-forwarded-', 'x-vercel-', 'sec-'];
 
 function extractClientHeaders(req: Request | undefined) {
   const headers = new Headers();
   for (const [key, value] of req?.headers ?? []) {
-    if (!STRIPPED_HEADERS.has(key) && !key.startsWith('mcp-param-')) {
+    if (
+      !STRIPPED_HEADERS.has(key) &&
+      !STRIPPED_PREFIXES.some((prefix) => key.startsWith(prefix))
+    ) {
       headers.set(key, value);
     }
   }
@@ -90,19 +116,17 @@ const handler = createMcpHandler(
         },
         async (args) => {
           try {
-            const text = await callApi(
-              tool.method,
-              config.apiBaseUrl,
-              tool.path,
-              clientHeaders,
+            const text = await callApi(tool, {
+              baseUrl: config.apiBaseUrl,
+              headers: clientHeaders,
               args,
-              tool.paramSources,
-            );
-            return { content: [{ type: 'text', text }] };
+              maxChars: config.maxResponseChars,
+            });
+            // A 204 or empty body is no content, not an empty text block.
+            return { content: text ? [{ type: 'text', text }] : [] };
           } catch (error) {
-            const message =
+            const text =
               error instanceof Error ? error.message : 'Unknown error';
-            const text = JSON.stringify({ error: message });
             return { content: [{ type: 'text', text }], isError: true };
           }
         },
