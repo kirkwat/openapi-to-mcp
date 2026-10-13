@@ -1,22 +1,18 @@
-import { getConfig } from './config.js';
-
 export interface ParamSource {
   name: string;
-  in: 'path' | 'query' | 'body';
+  // rawBody: the arg is sent as the whole request body.
+  in: 'path' | 'query' | 'rawBody';
 }
 
-/**
- * Calls the target API, splitting flat MCP tool params back into
- * path params, query params, and request body.
- */
+// Args that aren't path or query params become the JSON body.
 export async function callApi(
   method: string,
+  baseUrl: string,
   pathTemplate: string,
   headers: Headers,
   params: Record<string, unknown>,
   paramSources: ParamSource[],
 ) {
-  // Build sets for fast lookup
   const pathParams = new Set<string>();
   const queryParams = new Set<string>();
   for (const source of paramSources) {
@@ -24,7 +20,6 @@ export async function callApi(
     if (source.in === 'query') queryParams.add(source.name);
   }
 
-  // Substitute path params
   let path = pathTemplate;
   for (const name of pathParams) {
     const value = params[name];
@@ -34,8 +29,7 @@ export async function callApi(
     path = path.replace(`{${name}}`, encodeURIComponent(String(value)));
   }
 
-  // Build URL with query params
-  const url = new URL(path, getConfig().apiBaseUrl);
+  const url = new URL(baseUrl + path);
   for (const name of queryParams) {
     const value = params[name];
     if (value !== undefined) {
@@ -43,18 +37,21 @@ export async function callApi(
     }
   }
 
-  // Everything else is body
-  const bodyParams: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(params)) {
-    if (!pathParams.has(key) && !queryParams.has(key) && value !== undefined) {
-      bodyParams[key] = value;
-    }
+  const bodyParams = Object.fromEntries(
+    Object.entries(params).filter(
+      ([key, value]) =>
+        value !== undefined && !pathParams.has(key) && !queryParams.has(key),
+    ),
+  );
+  const rawBody = paramSources.find((s) => s.in === 'rawBody');
+  let body: unknown;
+  if (rawBody) {
+    body = bodyParams[rawBody.name];
+  } else if (Object.keys(bodyParams).length > 0) {
+    body = bodyParams;
   }
 
-  const hasBody =
-    Object.keys(bodyParams).length > 0 &&
-    method !== 'GET' &&
-    method !== 'DELETE';
+  const hasBody = body !== undefined && method !== 'GET' && method !== 'DELETE';
 
   const requestHeaders = new Headers(headers);
   if (hasBody) {
@@ -64,18 +61,12 @@ export async function callApi(
   const response = await fetch(url.toString(), {
     method,
     headers: requestHeaders,
-    ...(hasBody && { body: JSON.stringify(bodyParams) }),
+    ...(hasBody && { body: JSON.stringify(body) }),
   });
 
+  const text = await response.text();
   if (!response.ok) {
-    const text = await response.text();
     throw new Error(`API returned ${response.status}: ${text}`);
   }
-
-  const text = await response.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
+  return text;
 }
