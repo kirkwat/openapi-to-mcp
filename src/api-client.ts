@@ -4,8 +4,9 @@ export interface ParamSource {
   in: 'path' | 'query' | 'rawBody';
 }
 
-// JSON.parse rounds integers past 2^53, so bodies holding one are cut as text.
-const BIG_INTEGER = /(?<![\d.])-?\d{16,}(?![\d.])/;
+// JSON.parse rounds integer literals past 2^53, so bodies holding one are cut
+// as text. Only bare numbers count: digit runs inside strings (phones, ids) are safe.
+const BIG_INTEGER = /[:[,]\s*-?\d{16,}(?=\s*[,\]}])/;
 
 function truncate(text: string, maxChars: number, narrowWith: string[]) {
   if (maxChars === 0 || text.length <= maxChars) return text;
@@ -98,6 +99,13 @@ export async function callApi(
       throw new Error(`Missing required path parameter: ${name}`);
     }
     path = path.replace(`{${name}}`, encodeURIComponent(String(value)));
+  }
+  // A leftover placeholder means the spec names its path param differently.
+  const unfilled = path.match(/\{[^}]+\}/);
+  if (unfilled) {
+    throw new Error(
+      `Path ${operation.path} has no parameter for ${unfilled[0]}; the spec declares ${[...pathParams].join(', ') || 'none'}`,
+    );
   }
 
   const url = new URL(baseUrl + path);

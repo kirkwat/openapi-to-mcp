@@ -2,9 +2,11 @@
 
 A minimal [MCP](https://modelcontextprotocol.io) server that turns every operation in your OpenAPI spec into a tool, ready to deploy on Vercel.
 
-Useful when you want an existing API reachable from MCP clients such as Claude Desktop or Cursor today, with no code and no changes to the API: users connect with one URL and their existing API key. It fits internal and partner APIs, prototyping an agent integration before writing custom tools, and giving your users a working MCP server while a hand-crafted one is still on the roadmap. For large specs, expose only what matters with `MCP_TAGS`, `MCP_READ_ONLY`, and the `x-mcp-*` [spec extensions](#spec-extensions).
-
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/kirkwat/openapi-to-mcp&env=OPENAPI_SPEC_URL&envDescription=URL%20to%20your%20OpenAPI%20spec&envLink=https://github.com/kirkwat/openapi-to-mcp%23configuration)
+
+Point it at your OpenAPI spec and MCP clients such as Claude Desktop or Cursor can use your API today: one URL, the user's existing API key, no code. Your spec is the MCP configuration. Better descriptions, tags, and `x-mcp-*` [extensions](#spec-extensions) improve every client at once, with no separate tool layer to maintain.
+
+Each tool maps to one operation, so this is only as efficient as the API behind it. Every tool definition loads into the model's context and responses pass through as the API sends them, which costs more tokens on a large or verbose API than a hand-tuned server would. That is the trade for having no second layer to maintain, and the fixes live in your spec and API: tighter descriptions, paging and field selection, and a shorter tool list with `MCP_TAGS` and `x-mcp`. For more optimal workflows that span several calls, write a few tools of your own and let the generated ones cover the rest.
 
 ## Quick Start
 

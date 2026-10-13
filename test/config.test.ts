@@ -31,6 +31,18 @@ describe('config', () => {
     });
   });
 
+  it('resolves a relative servers url against the spec location', () => {
+    vi.stubEnv('OPENAPI_SPEC_URL', 'https://api.example.com/v1/openapi.json');
+    expect(resolveConfig({ ...spec, servers: [{ url: '/' }] }).apiBaseUrl).toBe(
+      'https://api.example.com',
+    );
+
+    vi.stubEnv('OPENAPI_SPEC_URL', '/local/openapi.yaml');
+    expect(() => resolveConfig({ ...spec, servers: [{ url: '/' }] })).toThrow(
+      'set API_BASE_URL',
+    );
+  });
+
   it('reports a missing OPENAPI_SPEC_URL', () => {
     vi.stubEnv('OPENAPI_SPEC_URL', '');
     expect(() => getEnv()).toThrow('OPENAPI_SPEC_URL is required');

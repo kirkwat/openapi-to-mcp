@@ -61,6 +61,19 @@ describe('callApi', () => {
     );
   });
 
+  it('refuses to send a placeholder the spec never names', async () => {
+    await expect(
+      call(
+        {
+          path: '/items/{id}',
+          paramSources: [{ name: 'item_id', in: 'path' }],
+        },
+        { item_id: '7' },
+      ),
+    ).rejects.toThrow('has no parameter for {id}; the spec declares item_id');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('substitutes placeholders in the path only, never the base URL', async () => {
     await call(
       {
@@ -218,6 +231,19 @@ describe('response truncation', () => {
     expect(Object.keys(parsed)).toEqual(['meta', 'records', 'page']);
     expect(parsed.records).toEqual(records.slice(0, parsed.records.length));
     expect(trailer).toContain(`showing ${parsed.records.length} of 50 records`);
+  });
+
+  it('still trims lists when long digit runs are inside strings', async () => {
+    const rows = Array.from({ length: 50 }, () => ({
+      phone: '+28148187701113002',
+    }));
+    respondWith(JSON.stringify(rows));
+
+    const text = await call({}, {}, { maxChars: 300 });
+
+    expect(text).toContain('Truncated: showing');
+    expect(text).not.toContain('characters');
+    expect(JSON.parse(text.split('\n')[0])[0].phone).toBe('+28148187701113002');
   });
 
   it('cuts as text when trimming would round a 64-bit integer', async () => {

@@ -29,10 +29,21 @@ export function getEnv() {
 export function resolveConfig(spec: OpenAPIV3.Document) {
   const env = getEnv();
 
-  const apiBaseUrl = env.API_BASE_URL || spec.servers?.[0]?.url;
-  if (!apiBaseUrl) {
+  const serverUrl = env.API_BASE_URL || spec.servers?.[0]?.url;
+  if (!serverUrl) {
     throw new Error(
       'Set API_BASE_URL env var or add servers[0].url to your OpenAPI spec',
+    );
+  }
+  // A relative servers[0].url ("/") is relative to where the spec is served
+  const specUrl = env.OPENAPI_SPEC_URL;
+  let apiBaseUrl: string;
+  try {
+    apiBaseUrl = new URL(serverUrl, URL.canParse(specUrl) ? specUrl : undefined)
+      .href;
+  } catch {
+    throw new Error(
+      `servers[0].url "${serverUrl}" cannot be resolved; set API_BASE_URL`,
     );
   }
 
